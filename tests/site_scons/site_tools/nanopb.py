@@ -92,7 +92,11 @@ def _detect_protocflags(env):
 def _nanopb_proto_actions(source, target, env, for_signature):
     esc = env['ESCAPE']
     dirs = ' '.join(['-I' + esc(env.GetBuildPath(d)) for d in env['PROTOCPATH']])
-    return '$PROTOC $PROTOCFLAGS %s --nanopb_out=. %s' % (dirs, esc(str(source[0])))
+    opts = ''
+    if str(target[0]).endswith('.cc'):
+        opts = '-X:'
+    
+    return '$PROTOC $PROTOCFLAGS %s --nanopb_out=%s. %s' % (dirs, opts, esc(str(source[0])))
 
 def _nanopb_proto_emitter(target, source, env):
     basename = os.path.splitext(str(source[0]))[0]
@@ -108,6 +112,12 @@ _nanopb_proto_builder = SCons.Builder.Builder(
     suffix = '.pb.c',
     src_suffix = '.proto',
     emitter = _nanopb_proto_emitter)
+
+_nanopb_proto_cplusplus_builder = SCons.Builder.Builder(
+    generator = _nanopb_proto_actions,
+    suffix = '.pb.cc',
+    src_suffix = '.proto',
+    emitter = _nanopb_proto_emitter)
        
 def generate(env):
     '''Add Builder for nanopb protos.'''
@@ -120,6 +130,7 @@ def generate(env):
     
     env.SetDefault(NANOPB_PROTO_CMD = '$PROTOC $PROTOCFLAGS --nanopb_out=. $SOURCES')
     env['BUILDERS']['NanopbProto'] = _nanopb_proto_builder
+    env['BUILDERS']['NanopbCPlusPlusProto'] = _nanopb_proto_cplusplus_builder
     
 def exists(env):
     return _detect_protoc(env) and _detect_protoc_opts(env)

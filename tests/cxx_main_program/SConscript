@@ -7,19 +7,35 @@ Import("env")
 env = env.Clone()
 env.Append(CPPDEFINES = ['__STDC_LIMIT_MACROS'])
 
-# Copy the files to .cxx extension in order to force C++ build.
+# Copy the files to .cc extension in order to force C++ build.
 c = Copy("$TARGET", "$SOURCE")
-env.Command("pb_encode.cxx", "#../pb_encode.c", c)
-env.Command("pb_decode.cxx", "#../pb_decode.c", c)
-env.Command("pb_common.cxx", "#../pb_common.c", c)
-env.Command("alltypes.pb.h", "$BUILD/alltypes/alltypes.pb.h", c)
-env.Command("alltypes.pb.cxx", "$BUILD/alltypes/alltypes.pb.c", c)
-env.Command("encode_alltypes.cxx", "$BUILD/alltypes/encode_alltypes.c", c)
-env.Command("decode_alltypes.cxx", "$BUILD/alltypes/decode_alltypes.c", c)
+env.Command("pb_encode.cc", "#../pb_encode.c", c)
+env.Command("pb_decode.cc", "#../pb_decode.c", c)
+env.Command("pb_common.cc", "#../pb_common.c", c)
+
+def replace_in_file(src, dst, placeholder, replacement):
+    data = open(str(src)).read()
+    assert placeholder in data
+    data = data.replace(placeholder, replacement)
+    open(str(dst), 'w').write(data)
+
+# Build modified en/decode_alltypes.cc
+env.Command("encode_alltypes.cc", "#alltypes/encode_alltypes.c",
+            lambda target, source, env: replace_in_file(source[0], target[0],
+                    '/* namespace placeholder */', 'using namespace test::package;'))
+env.Command("decode_alltypes.cc", "#alltypes/decode_alltypes.c",
+            lambda target, source, env: replace_in_file(source[0], target[0],
+                    '/* namespace placeholder */', 'using namespace test::package;'))
+
+# Build a modified alltypes.proto in C++ mode
+env.Command("alltypes.proto", "#alltypes/alltypes.proto",
+            lambda target, source, env: replace_in_file(source[0], target[0],
+                    '// package name placeholder', 'package test.package;'))
+env.NanopbProto(["alltypes.pb.h", "alltypes.pb.cc"], ["alltypes", "alltypes.options"])
 
 # Now build and run the test normally.
-enc = env.Program(["encode_alltypes.cxx", "alltypes.pb.cxx", "pb_encode.cxx", "pb_common.cxx"])
-dec = env.Program(["decode_alltypes.cxx", "alltypes.pb.cxx", "pb_decode.cxx", "pb_common.cxx"])
+enc = env.Program(["encode_alltypes.cc", "alltypes.pb.cc", "pb_encode.cc", "pb_common.cc"])
+dec = env.Program(["decode_alltypes.cc", "alltypes.pb.cc", "pb_decode.cc", "pb_common.cc"])
 
 env.RunTest(enc)
 env.RunTest([dec, "encode_alltypes.output"])

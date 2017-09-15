@@ -8,6 +8,8 @@
 #include "alltypes.pb.h"
 #include "test_helpers.h"
 
+/* namespace placeholder */
+
 int main(int argc, char **argv)
 {
     int mode = (argc > 1) ? atoi(argv[1]) : 0;

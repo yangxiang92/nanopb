@@ -7,6 +7,7 @@ nanopb_version = "nanopb-0.3.9-dev"
 
 import sys
 import re
+import copy
 from functools import reduce
 
 try:
@@ -99,10 +100,11 @@ class Names:
     def __init__(self, parts = ()):
         if isinstance(parts, Names):
             parts = parts.parts
+        
         self.parts = tuple(parts)
 
     def __str__(self):
-        return '_'.join(self.parts)
+        return '_'.join(self.parts).replace('::_', '::')
 
     def __add__(self, other):
         if isinstance(other, strtypes):
@@ -115,11 +117,44 @@ class Names:
     def __eq__(self, other):
         return isinstance(other, Names) and self.parts == other.parts
 
-def names_from_type_name(type_name):
+def names_from_type_name(type_name, options):
     '''Parse Names() from FieldDescriptorProto type_name'''
     if type_name[0] != '.':
         raise NotImplementedError("Lookup of non-absolute type names is not supported")
-    return Names(type_name[1:].split('.'))
+    parts = type_name[1:].split('.')
+    if options.namespace:
+        nparts = options.namespace.split('::')
+        if parts[:len(nparts)] == nparts:
+            parts = parts[len(nparts):]
+    return Names(parts)
+
+def strip_namespace(name, options):
+    name = str(name)
+    if options.namespace and name.startswith(options.namespace):
+        name = name[len(options.namespace):]
+    return name
+
+def make_identifier(headername):
+    '''Make #ifndef identifier that contains uppercase A-Z and digits 0-9'''
+    result = ""
+    for c in headername.upper():
+        if c.isalnum():
+            result += c
+        else:
+            result += '_'
+    return result
+
+def namespacename(packagename):
+    '''Make C++ namespace name from package name, parts separated with ::'''
+    return str(packagename).replace('.','::') + "::"
+
+def namespacedecl(packagename):
+    '''Make C++ namespace declaration from package name, parts prefixed with namespace X {'''
+    return 'namespace %s {' % str(packagename).replace('.',' { namespace ')
+
+def macroname(name):
+    '''Replace C++ namespaces with _ for macro identifiers.'''
+    return str(name).replace('::', '_')
 
 def varint_max_size(max_value):
     '''Returns the maximum number of bytes a varint can take when encoded.'''
@@ -185,11 +220,11 @@ class Enum:
         self.names = names + desc.name
 
         if enum_options.long_names:
-            self.values = [(self.names + x.name, x.number) for x in desc.value]
+            self.values = [(strip_namespace(self.names + x.name, self.options), x.number) for x in desc.value]
         else:
-            self.values = [(names + x.name, x.number) for x in desc.value]
+            self.values = [(strip_namespace(names + x.name, self.options), x.number) for x in desc.value]
 
-        self.value_longnames = [self.names + x.name for x in desc.value]
+        self.value_longnames = [strip_namespace(self.names + x.name, self.options) for x in desc.value]
         self.packed = enum_options.packed_enum
 
     def has_negative(self):
@@ -202,18 +237,19 @@ class Enum:
         return max([varint_max_size(v) for n,v in self.values])
 
     def __str__(self):
-        result = 'typedef enum _%s {\n' % self.names
+        result = 'typedef enum _%s {\n' % strip_namespace(self.names, self.options)
         result += ',\n'.join(["    %s = %d" % x for x in self.values])
         result += '\n}'
 
         if self.packed:
             result += ' pb_packed'
 
-        result += ' %s;' % self.names
+        result += ' %s;' % strip_namespace(self.names, self.options)
 
-        result += '\n#define _%s_MIN %s' % (self.names, self.values[0][0])
-        result += '\n#define _%s_MAX %s' % (self.names, self.values[-1][0])
-        result += '\n#define _%s_ARRAYSIZE ((%s)(%s+1))' % (self.names, self.names, self.values[-1][0])
+        result += '\n#define _%s_MIN %s' % (macroname(self.names), self.values[0][0])
+        result += '\n#define _%s_MAX %s' % (macroname(self.names), self.values[-1][0])
+        result += '\n#define _%s_ARRAYSIZE ((%s)(%s+1))' % (macroname(self.names),
+                                                            macroname(self.names), self.values[-1][0])
 
         if not self.options.long_names:
             # Define the long names always so that enum value references
@@ -275,6 +311,8 @@ class Field:
         self.array_decl = ""
         self.enc_size = None
         self.ctype = None
+        self.submsgname = None
+        self.enumname = None
 
         if field_options.type == nanopb_pb2.FT_INLINE:
             # Before nanopb-0.3.8, fixed length bytes arrays were specified
@@ -353,7 +391,8 @@ class Field:
                     self.ctype = 'u' + self.ctype;
         elif desc.type == FieldD.TYPE_ENUM:
             self.pbtype = 'ENUM'
-            self.ctype = names_from_type_name(desc.type_name)
+            self.enumname = names_from_type_name(desc.type_name, field_options)
+            self.ctype = strip_namespace(self.enumname, field_options)
             if self.default is not None:
                 self.default = self.ctype + self.default
             self.enc_size = None # Needs to be filled in when enum values are known
@@ -379,11 +418,12 @@ class Field:
                 self.pbtype = 'BYTES'
                 self.ctype = 'pb_bytes_array_t'
                 if self.allocation == 'STATIC':
-                    self.ctype = self.struct_name + self.name + 't'
+                    self.ctype = strip_namespace(self.struct_name + self.name + 't', field_options)
                     self.enc_size = varint_max_size(self.max_size) + self.max_size
         elif desc.type == FieldD.TYPE_MESSAGE:
             self.pbtype = 'MESSAGE'
-            self.ctype = self.submsgname = names_from_type_name(desc.type_name)
+            self.submsgname = names_from_type_name(desc.type_name, field_options)
+            self.ctype = strip_namespace(self.submsgname, field_options)
             self.enc_size = None # Needs to be filled in after the message type is available
         else:
             raise NotImplementedError(desc.type)
@@ -429,7 +469,7 @@ class Field:
     def get_dependencies(self):
         '''Get list of type names used by this field.'''
         if self.allocation == 'STATIC':
-            return [str(self.ctype)]
+            return [str(self.submsgname or self.enumname or self.ctype)]
         else:
             return []
 
@@ -535,7 +575,7 @@ class Field:
 
     def tags(self):
         '''Return the #define for the tag number of this field.'''
-        identifier = '%s_%s_tag' % (self.struct_name, self.name)
+        identifier = macroname('%s_%s_tag' % (self.struct_name, self.name))
         return '#define %-40s %d\n' % (identifier, self.tag)
 
     def pb_field_t(self, prev_field_name, union_index = None):
@@ -702,7 +742,7 @@ class ExtensionRange(Field):
 class ExtensionField(Field):
     def __init__(self, struct_name, desc, field_options):
         self.fullname = struct_name + desc.name
-        self.extendee_name = names_from_type_name(desc.extendee)
+        self.extendee_name = names_from_type_name(desc.extendee, field_options)
         Field.__init__(self, self.fullname + 'struct', desc, field_options)
 
         if self.rules != 'OPTIONAL':
@@ -713,7 +753,7 @@ class ExtensionField(Field):
 
     def tags(self):
         '''Return the #define for the tag number of this field.'''
-        identifier = '%s_tag' % self.fullname
+        identifier = macroname('%s_tag' % self.fullname)
         return '#define %-40s %d\n' % (identifier, self.tag)
 
     def extension_decl(self):
@@ -848,8 +888,9 @@ class Message:
         self.name = names
         self.fields = []
         self.oneofs = {}
+        self.options = message_options
         no_unions = []
-
+        
         if message_options.msgid:
             self.msgid = message_options.msgid
 
@@ -899,7 +940,7 @@ class Message:
         return deps
 
     def __str__(self):
-        result = 'typedef struct _%s {\n' % self.name
+        result = 'typedef struct _%s {\n' % strip_namespace(self.name, self.options)
 
         if not self.ordered_fields:
             # Empty structs are not allowed in C standard.
@@ -913,7 +954,7 @@ class Message:
         if self.packed:
             result += ' pb_packed'
 
-        result += ' %s;' % self.name
+        result += ' %s;' % strip_namespace(self.name, self.options)
 
         if self.packed:
             result = 'PB_PACKED_STRUCT_START\n' + result
@@ -1049,21 +1090,12 @@ def sort_dependencies(messages):
         if msgname in message_by_name:
             yield message_by_name[msgname]
 
-def make_identifier(headername):
-    '''Make #ifndef identifier that contains uppercase A-Z and digits 0-9'''
-    result = ""
-    for c in headername.upper():
-        if c.isalnum():
-            result += c
-        else:
-            result += '_'
-    return result
-
 class ProtoFile:
     def __init__(self, fdesc, file_options):
         '''Takes a FileDescriptorProto and parses it.'''
         self.fdesc = fdesc
         self.file_options = file_options
+        self.namespace_decl = None
         self.dependencies = {}
         self.parse()
 
@@ -1076,16 +1108,20 @@ class ProtoFile:
         self.messages = []
         self.extensions = []
 
-        if self.fdesc.package:
-            base_name = Names(self.fdesc.package.split('.'))
+        if self.fdesc.package and self.file_options.cplusplus:
+            self.file_options.namespace = namespacename(self.fdesc.package)
+            self.namespace_decl = namespacedecl(self.fdesc.package)
+            self.base_name = Names((self.file_options.namespace,))
+        elif self.fdesc.package:
+            self.base_name = Names(self.fdesc.package.split('.'))
         else:
-            base_name = Names()
+            self.base_name = Names()
 
         for enum in self.fdesc.enum_type:
-            enum_options = get_nanopb_suboptions(enum, self.file_options, base_name + enum.name)
-            self.enums.append(Enum(base_name, enum, enum_options))
+            enum_options = get_nanopb_suboptions(enum, self.file_options, self.base_name + enum.name)
+            self.enums.append(Enum(self.base_name, enum, enum_options))
 
-        for names, message in iterate_messages(self.fdesc, base_name):
+        for names, message in iterate_messages(self.fdesc, self.base_name):
             message_options = get_nanopb_suboptions(message, self.file_options, names)
 
             if message_options.skip_message:
@@ -1096,7 +1132,7 @@ class ProtoFile:
                 enum_options = get_nanopb_suboptions(enum, message_options, names + enum.name)
                 self.enums.append(Enum(names, enum, enum_options))
 
-        for names, extension in iterate_extensions(self.fdesc, base_name):
+        for names, extension in iterate_extensions(self.fdesc, self.base_name):
             field_options = get_nanopb_suboptions(extension, self.file_options, names + extension.name)
             if field_options.type != nanopb_pb2.FT_IGNORE:
                 self.extensions.append(ExtensionField(names, extension, field_options))
@@ -1162,6 +1198,8 @@ class ProtoFile:
         yield '\n'
 
         yield '#ifdef __cplusplus\n'
+        if self.namespace_decl:
+            yield "%s\n" % self.namespace_decl
         yield 'extern "C" {\n'
         yield '#endif\n\n'
 
@@ -1190,10 +1228,10 @@ class ProtoFile:
 
             yield '/* Initializer values for message structs */\n'
             for msg in self.messages:
-                identifier = '%s_init_default' % msg.name
+                identifier = macroname('%s_init_default' % msg.name)
                 yield '#define %-40s %s\n' % (identifier, msg.get_initializer(False))
             for msg in self.messages:
-                identifier = '%s_init_zero' % msg.name
+                identifier = macroname('%s_init_zero' % msg.name)
                 yield '#define %-40s %s\n' % (identifier, msg.get_initializer(True))
             yield '\n'
 
@@ -1213,7 +1251,7 @@ class ProtoFile:
             yield '/* Maximum encoded size of messages (where known) */\n'
             for msg in self.messages:
                 msize = msg.encoded_size(self.dependencies)
-                identifier = '%s_size' % msg.name
+                identifier = macroname('%s_size' % msg.name)
                 if msize is not None:
                     yield '#define %-40s %s\n' % (identifier, msize)
                 else:
@@ -1242,13 +1280,15 @@ class ProtoFile:
 
             for msg in self.messages:
                 if hasattr(msg,'msgid'):
-                    yield '#define %s_msgid %d\n' % (msg.name, msg.msgid)
+                    yield '#define %s_msgid %d\n' % (macroname(msg.name), msg.msgid)
             yield '\n'
 
             yield '#endif\n\n'
 
         yield '#ifdef __cplusplus\n'
         yield '} /* extern "C" */\n'
+        if self.namespace_decl:
+            yield '} /* namespace */\n'
         yield '#endif\n'
 
         # End of header
@@ -1272,6 +1312,9 @@ class ProtoFile:
         yield '#endif\n'
         yield '\n'
 
+        if self.namespace_decl:
+            yield "%s\n\n" % self.namespace_decl
+        
         for msg in self.messages:
             yield msg.default_decl(False)
 
@@ -1360,6 +1403,9 @@ class ProtoFile:
             yield ' */\n'
             yield 'PB_STATIC_ASSERT(sizeof(double) == 8, DOUBLE_MUST_BE_8_BYTES)\n'
 
+        if self.namespace_decl:
+            yield "\n} /* namespace */\n"
+        
         yield '\n'
         yield '/* @@protoc_insertion_point(eof) */\n'
 
@@ -1554,7 +1600,7 @@ def process_file(filename, fdesc, options, other_files = {}):
     # Decide the file names
     noext = os.path.splitext(filename)[0]
     headername = noext + options.extension + '.h'
-    sourcename = noext + options.extension + '.c'
+    sourcename = noext + options.extension + ('.cc' if f.file_options.cplusplus else '.c')
     headerbasename = os.path.basename(headername)
 
     # List of .proto files that should not be included in the C header file

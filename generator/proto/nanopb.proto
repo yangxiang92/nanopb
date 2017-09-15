@@ -80,6 +80,16 @@ message NanoPBOptions {
 
   // Generate bytes arrays with fixed length
   optional bool fixed_length = 15 [default = false];
+  
+  // Use .cc extension and C++ namespaces for this file/field.
+  // Usually you would only want to set this per file or for all files,
+  // but if you have a weird mix of C and C++ code, you can set it per-field
+  // also.
+  optional bool cplusplus = 16 [default = false];
+  
+  // Defines the C++ namespace to use for this message/field.
+  // Mainly for internal use in generator only.
+  optional string namespace = 17 [default = ""];
 }
 
 // Extensions to protoc 'Descriptor' type in order to define options

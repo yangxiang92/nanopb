@@ -10,6 +10,8 @@
 #include "alltypes.pb.h"
 #include "test_helpers.h"
 
+/* namespace placeholder */
+
 #define TEST(x) if (!(x)) { \
     printf("Test " #x " failed.\n"); \
     return false; \
